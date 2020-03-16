@@ -199,6 +199,7 @@ gosec-sast:
     - apk add pkgconfig libgit2-dev gcc libc-dev
 
 license_management:
+  image: registry.gitlab.com/gitlab-org/security-products/license-management/tmp:9059b70682932f77d37e21f552cab1175b0dc44d
   before_script:
     - sudo apt-get update
     - sudo apt-get install -y libicu-dev libgit2-dev cmake
