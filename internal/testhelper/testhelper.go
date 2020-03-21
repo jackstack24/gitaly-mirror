@@ -681,3 +681,14 @@ STDIN.each_line do |line|
   exit 1 unless	system(*%W[git cat-file -e #{new_object}])
 end
 `
+
+func WriteBlobs(t testing.TB, testRepoPath string, n int) []string {
+	var blobIDs []string
+	for i := 0; i < n; i++ {
+		var stdin bytes.Buffer
+		stdin.Write([]byte(strconv.Itoa(time.Now().Nanosecond())))
+		blobIDs = append(blobIDs, text.ChompBytes(MustRunCommand(t, &stdin, "git", "-C", testRepoPath, "hash-object", "-w", "--stdin")))
+	}
+
+	return blobIDs
+}
