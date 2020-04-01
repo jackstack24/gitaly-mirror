@@ -1,10 +1,6 @@
 // Copyright 2017 Michal Witkowski. All Rights Reserved.
 // See LICENSE for licensing terms.
 
-// TODO: remove the following linter override when the deprecations are fixed
-// in issue https://gitlab.com/gitlab-org/gitaly/issues/1663
-//lint:file-ignore SA1019 Ignore all gRPC deprecations until issue #1663
-
 package proxy
 
 import (
@@ -106,8 +102,6 @@ func (s *handler) handler(srv interface{}, serverStream grpc.ServerStream) error
 		return err
 	}
 
-	defer params.RequestFinalizer()
-
 	clientCtx, clientCancel := context.WithCancel(params.Context())
 	defer clientCancel()
 	// TODO(mwitkow): Add a `forwarded` header to metadata, https://en.wikipedia.org/wiki/X-Forwarded-For.
@@ -115,10 +109,21 @@ func (s *handler) handler(srv interface{}, serverStream grpc.ServerStream) error
 	if err != nil {
 		return err
 	}
+
+	if err := s.forwardStreams(serverStream, clientStream, peeker.consumedStream); err != nil {
+		return err
+	}
+
+	params.RequestFinalizer()
+
+	return nil
+}
+
+func (s *handler) forwardStreams(serverStream grpc.ServerStream, clientStream grpc.ClientStream, consumedStream *partialStream) error {
 	// Explicitly *do not close* s2cErrChan and c2sErrChan, otherwise the select below will not terminate.
 	// Channels do not have to be closed, it is just a control flow mechanism, see
 	// https://groups.google.com/forum/#!msg/golang-nuts/pZwdYRGxCIk/qpbHxRRPJdUJ
-	s2cErrChan := s.forwardServerToClient(serverStream, clientStream, peeker.consumedStream)
+	s2cErrChan := s.forwardServerToClient(serverStream, clientStream, consumedStream)
 	c2sErrChan := s.forwardClientToServer(clientStream, serverStream)
 	// We don't know which side is going to stop sending first, so we need a select between the two.
 	for i := 0; i < 2; i++ {
@@ -132,7 +137,6 @@ func (s *handler) handler(srv interface{}, serverStream grpc.ServerStream) error
 				// however, we may have gotten a receive error (stream disconnected, a read error etc) in which case we need
 				// to cancel the clientStream to the backend, let all of its goroutines be freed up by the CancelFunc and
 				// exit with an error to the stack
-				clientCancel()
 				return status.Errorf(codes.Internal, "failed proxying s2c: %v", s2cErr)
 			}
 		case c2sErr := <-c2sErrChan:

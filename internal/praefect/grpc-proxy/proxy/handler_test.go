@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,6 +128,7 @@ func (s *assertingService) PingStream(stream pb.TestService_PingStreamServer) er
 // ProxyHappySuite tests the "happy" path of handling: that everything works in absence of connection issues.
 type ProxyHappySuite struct {
 	suite.Suite
+	finCounter int32
 
 	serverListener   net.Listener
 	server           *grpc.Server
@@ -136,6 +138,10 @@ type ProxyHappySuite struct {
 
 	client     *grpc.ClientConn
 	testClient pb.TestServiceClient
+}
+
+func (s *ProxyHappySuite) finalizersCount() int {
+	return int(atomic.LoadInt32(&s.finCounter))
 }
 
 func (s *ProxyHappySuite) ctx() context.Context {
@@ -238,6 +244,18 @@ func (s *ProxyHappySuite) TestPingStream_StressTest() {
 	}
 }
 
+func (s *ProxyHappySuite) TestRequestFinalizerExecutedOnSuccess() {
+	_, err := s.testClient.Ping(s.ctx(), &pb.PingRequest{Value: "foo"})
+	require.NoError(s.T(), err, "Ping should succeed without errors")
+	require.Equal(s.T(), 1, s.finalizersCount())
+}
+
+func (s *ProxyHappySuite) TestRequestFinalizerNotExecutedOnFailure() {
+	_, err := s.testClient.PingError(s.ctx(), &pb.PingRequest{Value: "foo"})
+	require.Error(s.T(), err, "PingError should never succeed")
+	require.Equal(s.T(), 0, s.finalizersCount())
+}
+
 func (s *ProxyHappySuite) SetupSuite() {
 	var err error
 
@@ -259,8 +277,11 @@ func (s *ProxyHappySuite) SetupSuite() {
 				return proxy.NewStreamParameters(ctx, nil, nil, nil), status.Errorf(codes.PermissionDenied, "testing rejection")
 			}
 		}
+
+		finalizer := func() { atomic.AddInt32(&s.finCounter, 1) }
+
 		// Explicitly copy the metadata, otherwise the tests will fail.
-		return proxy.NewStreamParameters(ctx, s.serverClientConn, nil, nil), nil
+		return proxy.NewStreamParameters(ctx, s.serverClientConn, finalizer, nil), nil
 	}
 
 	s.proxy = grpc.NewServer(
@@ -296,6 +317,10 @@ func (s *ProxyHappySuite) SetupSuite() {
 	clientConn, err := grpc.DialContext(ctx, strings.Replace(s.proxyListener.Addr().String(), "127.0.0.1", "localhost", 1), grpc.WithInsecure())
 	require.NoError(s.T(), err, "must not error on deferred client Dial")
 	s.testClient = pb.NewTestServiceClient(clientConn)
+}
+
+func (s *ProxyHappySuite) SetupTest() {
+	atomic.StoreInt32(&s.finCounter, 0)
 }
 
 func (s *ProxyHappySuite) TearDownSuite() {
