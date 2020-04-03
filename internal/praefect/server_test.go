@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"gitlab.com/gitlab-org/gitaly/internal/helper/text"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/config"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/datastore"
+	"gitlab.com/gitlab-org/gitaly/internal/praefect/grpc-proxy/proxy"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/mock"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/models"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/nodes"
@@ -566,6 +568,103 @@ func TestRepoRename(t *testing.T) {
 	require.DirExists(t, expNewPath1, "must be renamed on secondary from %q to %q", path1, expNewPath1)
 	pollUntilRemoved(t, path2, time.After(10*time.Second))
 	require.DirExists(t, expNewPath2, "must be renamed on secondary from %q to %q", path2, expNewPath2)
+}
+
+func TestRequestFinalizer(t *testing.T) {
+	defer func(oldStorages []gconfig.Storage) { gconfig.Config.Storages = oldStorages }(gconfig.Config.Storages)
+
+	tmpDir, err := ioutil.TempDir("", "")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, os.RemoveAll(tmpDir)) }()
+	gconfig.Config.Storages[0].Path = tmpDir
+
+	_, backendAddr, cleanupGitaly := runInternalGitalyServer(t, "")
+	defer cleanupGitaly()
+
+	conf := config.Config{
+		VirtualStorages: []*config.VirtualStorage{
+			{
+				Name: "default",
+				Nodes: []*models.Node{
+					{
+						Storage:        gconfig.Config.Storages[0].Name,
+						Address:        backendAddr,
+						DefaultPrimary: true,
+					},
+				},
+			},
+		},
+	}
+
+	ds := datastore.Datastore{ReplicasDatastore: datastore.NewInMemory(conf)}
+	logEntry := testhelper.DiscardTestEntry(t)
+
+	nodeMgr, err := nodes.NewManager(logEntry, conf, promtest.NewMockHistogramVec())
+	require.NoError(t, err)
+	nodeMgr.Start(time.Millisecond, time.Millisecond)
+
+	registry := protoregistry.New()
+	require.NoError(t, registry.RegisterFiles(protoregistry.GitalyProtoFileDescriptors...))
+
+	actualCoordinator := NewCoordinator(logEntry, ds, nodeMgr, conf, registry)
+	var rpcCounter int32
+	var finalizerCounter int32
+	spyCoordinator := func(ctx context.Context, fullMethodName string, peeker proxy.StreamModifier) (*proxy.StreamParameters, error) {
+		streamParams, err := actualCoordinator.StreamDirector(ctx, fullMethodName, peeker)
+		if err != nil {
+			return nil, err
+		}
+		var finalizer = func() {
+			atomic.AddInt32(&finalizerCounter, 1)
+			streamParams.RequestFinalizer()
+		}
+		atomic.AddInt32(&rpcCounter, 1)
+		return proxy.NewStreamParameters(streamParams.Context(), streamParams.Conn(), finalizer, streamParams.CallOptions()), nil
+	}
+
+	prf := NewServer(spyCoordinator, logEntry, registry, conf)
+	prf.RegisterServices(nodeMgr, conf, ds)
+	listener, port := listenAvailPort(t)
+	go func() { require.NoError(t, prf.Serve(listener, false)) }()
+
+	cc := dialLocalPort(t, port, false)
+
+	ctx, cancel := testhelper.Context()
+	defer cancel()
+
+	repoClient := gitalypb.NewRepositoryServiceClient(cc)
+
+	// ok call
+	_, err = repoClient.CreateRepository(ctx, &gitalypb.CreateRepositoryRequest{
+		Repository: &gitalypb.Repository{
+			StorageName:  gconfig.Config.Storages[0].Name,
+			RelativePath: "old-name",
+		},
+	})
+	require.NoError(t, err)
+
+	// ok call
+	_, err = repoClient.RenameRepository(ctx, &gitalypb.RenameRepositoryRequest{
+		Repository: &gitalypb.Repository{
+			StorageName:  gconfig.Config.Storages[0].Name,
+			RelativePath: "old-name",
+		},
+		RelativePath: "new name!",
+	})
+	require.NoError(t, err)
+
+	// fail call - can't rename already renamed repo
+	_, err = repoClient.RenameRepository(ctx, &gitalypb.RenameRepositoryRequest{
+		Repository: &gitalypb.Repository{
+			StorageName:  gconfig.Config.Storages[0].Name,
+			RelativePath: "old-name", // is alrady 'new name!'
+		},
+		RelativePath: "will never be renamed",
+	})
+	require.Error(t, err)
+
+	require.Equal(t, int32(3), atomic.LoadInt32(&rpcCounter), "all three RPC calls must be executed")
+	require.Equal(t, int32(2), atomic.LoadInt32(&finalizerCounter), "only two request finalizers must be executed")
 }
 
 func tempStoragePath(t testing.TB) string {
