@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"gitlab.com/gitlab-org/gitaly/internal/git/stats"
+	"gitlab.com/gitlab-org/gitaly/internal/git/updateref"
 	"gitlab.com/gitlab-org/gitaly/internal/testhelper"
 )
 
@@ -40,10 +41,9 @@ func TestOptimizeRepository(t *testing.T) {
 	ctx, cancel := testhelper.Context()
 	defer cancel()
 
-	profile, err := stats.GetProfile(ctx, testRepo)
+	hasBitmap, err := stats.HasBitmap(testRepo)
 	require.NoError(t, err)
-
-	require.True(t, profile.HasBitmap())
+	require.True(t, hasBitmap, "expect a bitmap since we just repacked with -b")
 
 	// get timestamp of latest packfile
 	newestsPackfileTime := getNewestPackfileModtime(t, testRepoPath)
@@ -60,10 +60,15 @@ func TestOptimizeRepository(t *testing.T) {
 	blobs := 10
 	blobIDs := testhelper.WriteBlobs(t, testRepoPath, blobs)
 
+	updater, err := updateref.New(ctx, testRepo)
+	require.NoError(t, err)
+
 	for _, blobID := range blobIDs {
 		commitID := testhelper.CommitBlobWithName(t, testRepoPath, blobID, blobID, "adding another blob....")
-		testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "update-ref", "refs/heads/"+blobID, commitID)
+		require.NoError(t, updater.Create("refs/heads/"+blobID, commitID))
 	}
+
+	require.NoError(t, updater.Wait())
 
 	bitmaps, err := filepath.Glob(filepath.Join(testRepoPath, "objects", "pack", "*.bitmap"))
 	require.NoError(t, err)
