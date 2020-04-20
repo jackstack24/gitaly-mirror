@@ -86,6 +86,7 @@ func (nr nodeReconciler) reconcile() error {
 		return err
 	}
 
+	log.Printf("Checking consistency...")
 	if err := nr.consumeStream(stream); err != nil {
 		return err
 	}
@@ -134,7 +135,10 @@ func (nr nodeReconciler) validateArgs() error {
 }
 
 func (nr nodeReconciler) consumeStream(stream gitalypb.PraefectInfoService_ConsistencyCheckClient) error {
-	for {
+	var rStorage string
+	var i uint
+
+	for ; ; i++ {
 		resp, err := stream.Recv()
 		if err == io.EOF {
 			break
@@ -143,13 +147,23 @@ func (nr nodeReconciler) consumeStream(stream gitalypb.PraefectInfoService_Consi
 			return err
 		}
 
+		if resp.ReferenceStorage != rStorage {
+			rStorage = resp.ReferenceStorage
+			log.Print("Reference storage being used: " + rStorage)
+		}
+
 		if resp.GetReferenceChecksum() != resp.GetTargetChecksum() {
 			log.Printf(
 				"INCONSISTENT: %s - replication scheduled: #%d",
 				resp.GetRepoRelativePath(),
 				resp.GetReplJobId(),
 			)
+			continue
 		}
+
+		log.Print("CONSISTENT: " + resp.GetRepoRelativePath())
 	}
+
+	log.Printf("FINISHED: %d repos were checked for consistency", i)
 	return nil
 }

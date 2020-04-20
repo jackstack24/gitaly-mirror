@@ -77,11 +77,14 @@ func TestConsistencyCheck(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	disableReconcilliation := false
+
 	reposAreConsistent := func() (consistent bool) {
 		stream, err := praefectCli.ConsistencyCheck(ctx, &gitalypb.ConsistencyCheckRequest{
-			VirtualStorage:   virtualStorage.Name,
-			ReferenceStorage: primary.Storage,
-			TargetStorage:    secondary.Storage,
+			VirtualStorage:         virtualStorage.Name,
+			ReferenceStorage:       primary.Storage,
+			TargetStorage:          secondary.Storage,
+			DisableReconcilliation: disableReconcilliation,
 		})
 		require.NoError(t, err)
 
@@ -96,6 +99,8 @@ func TestConsistencyCheck(t *testing.T) {
 			require.NotZero(t, resp.ReplJobId,
 				"A replication job should be scheduled when inconsistent")
 		}
+
+		require.Equal(t, primary.Storage, resp.ReferenceStorage)
 
 		return consistent
 	}

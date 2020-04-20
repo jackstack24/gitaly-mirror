@@ -187,7 +187,7 @@ func scheduleReplication(ctx context.Context, csr checksumResult, q Queue, resp 
 	return nil
 }
 
-func ensureConsistency(ctx context.Context, checksumResultQ <-chan checksumResult, q Queue, stream gitalypb.PraefectInfoService_ConsistencyCheckServer) error {
+func ensureConsistency(ctx context.Context, reconcile bool, checksumResultQ <-chan checksumResult, q Queue, stream gitalypb.PraefectInfoService_ConsistencyCheckServer) error {
 	for csr := range checksumResultQ {
 		select {
 		case <-ctx.Done():
@@ -200,9 +200,10 @@ func ensureConsistency(ctx context.Context, checksumResultQ <-chan checksumResul
 			RepoRelativePath:  csr.relativePath,
 			ReferenceChecksum: csr.reference,
 			TargetChecksum:    csr.target,
+			ReferenceStorage:  csr.referenceStorage,
 		}
 
-		if csr.reference != csr.target {
+		if csr.reference != csr.target && reconcile {
 			if err := scheduleReplication(ctx, csr, q, resp); err != nil {
 				return err
 			}
@@ -241,7 +242,7 @@ func (s *Server) ConsistencyCheck(req *gitalypb.ConsistencyCheckRequest, stream 
 		return checksumRepos(ctx, walkerQ, checksumResultQ, target, reference)
 	})
 	g.Go(func() error {
-		return ensureConsistency(ctx, checksumResultQ, s.queue, stream)
+		return ensureConsistency(ctx, req.GetDisableReconcilliation(), checksumResultQ, s.queue, stream)
 	})
 
 	return g.Wait()
