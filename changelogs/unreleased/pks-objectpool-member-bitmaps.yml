@@ -1,0 +1,5 @@
+---
+title: Fix multiple bitmaps potentially coexisting when creating new object pools
+merge_request: 2092
+author:
+type: fixed

@@ -76,14 +76,6 @@ func (o *ObjectPool) Link(ctx context.Context, repo *gitalypb.Repository) error 
 // change "eventually" to "immediately", so that users won't see the
 // warning. https://gitlab.com/gitlab-org/gitaly/issues/1728
 func (o *ObjectPool) removeMemberBitmaps(repo repository.GitRepo) error {
-	poolBitmaps, err := getBitmaps(o)
-	if err != nil {
-		return err
-	}
-	if len(poolBitmaps) == 0 {
-		return nil
-	}
-
 	memberBitmaps, err := getBitmaps(repo)
 	if err != nil {
 		return err

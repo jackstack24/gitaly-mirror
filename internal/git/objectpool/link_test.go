@@ -53,34 +53,75 @@ func TestLinkRemoveBitmap(t *testing.T) {
 	ctx, cancel := testhelper.Context()
 	defer cancel()
 
-	testRepo, testRepoPath, cleanupFn := testhelper.NewTestRepo(t)
-	defer cleanupFn()
+	testCases := []struct {
+		desc           string
+		poolHasBitmaps bool
+	}{
+		{
+			desc:           "pool has bitmaps",
+			poolHasBitmaps: true,
+		},
+		{
+			desc:           "pool does not have bitmaps",
+			poolHasBitmaps: false,
+		},
+	}
 
-	pool, poolCleanup := NewTestObjectPool(ctx, t, testRepo.GetStorageName())
-	defer poolCleanup()
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			testRepo, testRepoPath, cleanupFn := testhelper.NewTestRepo(t)
+			defer cleanupFn()
 
-	require.NoError(t, pool.Init(ctx))
+			pool, poolCleanup := NewTestObjectPool(ctx, t, testRepo.GetStorageName())
+			defer poolCleanup()
 
-	poolPath := pool.FullPath()
-	testhelper.MustRunCommand(t, nil, "git", "-C", poolPath, "fetch", testRepoPath, "+refs/*:refs/*")
+			require.NoError(t, pool.Init(ctx))
 
-	testhelper.MustRunCommand(t, nil, "git", "-C", poolPath, "repack", "-adb")
-	require.Len(t, listBitmaps(t, pool.FullPath()), 1, "pool bitmaps before")
+			poolPath := pool.FullPath()
+			testhelper.MustRunCommand(t, nil, "git", "-C", poolPath, "fetch", testRepoPath, "+refs/*:refs/*")
 
-	testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "repack", "-adb")
-	require.Len(t, listBitmaps(t, testRepoPath), 1, "member bitmaps before")
+			testhelper.MustRunCommand(t, nil, "git", "-C", poolPath, "repack", "-adb")
+			if tc.poolHasBitmaps {
+				require.Len(t, listBitmaps(t, pool.FullPath()), 1, "pool bitmaps before")
+			} else {
+				removeBitmaps(t, pool.FullPath())
+				require.Len(t, listBitmaps(t, pool.FullPath()), 0, "pool bitmaps before")
+			}
 
-	refsBefore := testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "for-each-ref")
+			testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "repack", "-adb")
+			require.Len(t, listBitmaps(t, testRepoPath), 1, "member bitmaps before")
 
-	require.NoError(t, pool.Link(ctx, testRepo))
+			refsBefore := testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "for-each-ref")
 
-	require.Len(t, listBitmaps(t, pool.FullPath()), 1, "pool bitmaps after")
-	require.Len(t, listBitmaps(t, testRepoPath), 0, "member bitmaps after")
+			require.NoError(t, pool.Link(ctx, testRepo))
 
-	testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "fsck")
+			if tc.poolHasBitmaps {
+				require.Len(t, listBitmaps(t, pool.FullPath()), 1, "pool bitmaps after")
+			} else {
+				require.Len(t, listBitmaps(t, pool.FullPath()), 0, "pool bitmaps after")
+			}
+			require.Len(t, listBitmaps(t, testRepoPath), 0, "member bitmaps after")
 
-	refsAfter := testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "for-each-ref")
-	require.Equal(t, refsBefore, refsAfter, "compare member refs before/after link")
+			testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "fsck")
+
+			refsAfter := testhelper.MustRunCommand(t, nil, "git", "-C", testRepoPath, "for-each-ref")
+			require.Equal(t, refsBefore, refsAfter, "compare member refs before/after link")
+		})
+	}
+}
+
+func removeBitmaps(t *testing.T, repoPath string) {
+	packDir := filepath.Join(repoPath, "objects", "pack")
+
+	entries, err := ioutil.ReadDir(packDir)
+	require.NoError(t, err)
+
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".bitmap") {
+			bitmap := filepath.Join(packDir, entry.Name())
+			require.NoError(t, os.Remove(bitmap))
+		}
+	}
 }
 
 func listBitmaps(t *testing.T, repoPath string) []string {
