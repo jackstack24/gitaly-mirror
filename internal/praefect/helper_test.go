@@ -113,7 +113,7 @@ func runPraefectServerWithMock(t *testing.T, conf config.Config, ds datastore.Da
 		conf.VirtualStorages[0].Nodes[i] = node
 	}
 
-	nodeMgr, err := nodes.NewManager(testhelper.DiscardTestEntry(t), conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(testhelper.DiscardTestEntry(t), conf, nil, datastore.Datastore{}, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 	nodeMgr.Start(1*time.Millisecond, 5*time.Millisecond)
 
@@ -160,7 +160,7 @@ func noopBackoffFunc() (backoff, backoffReset) {
 func runPraefectServerWithGitaly(t *testing.T, conf config.Config) (*grpc.ClientConn, *Server, testhelper.Cleanup) {
 	ds := datastore.Datastore{
 		ReplicasDatastore:     datastore.NewInMemory(conf),
-		ReplicationEventQueue: datastore.NewMemoryReplicationEventQueue(),
+		ReplicationEventQueue: datastore.NewMemoryReplicationEventQueue(conf),
 	}
 
 	return runPraefectServerWithGitalyWithDatastore(t, conf, ds)
@@ -190,7 +190,7 @@ func runPraefectServerWithGitalyWithDatastore(t *testing.T, conf config.Config, 
 
 	logEntry := log.Default()
 
-	nodeMgr, err := nodes.NewManager(testhelper.DiscardTestEntry(t), conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(testhelper.DiscardTestEntry(t), conf, nil, ds, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 	nodeMgr.Start(1*time.Millisecond, 5*time.Millisecond)
 
@@ -220,7 +220,7 @@ func runPraefectServerWithGitalyWithDatastore(t *testing.T, conf config.Config, 
 
 	prf.RegisterServices(nodeMgr, conf, ds)
 	go func() { errQ <- prf.Serve(listener, false) }()
-	go func() { errQ <- replmgr.ProcessBacklog(ctx, noopBackoffFunc) }()
+	go func() { replmgr.ProcessBacklog(ctx, noopBackoffFunc) }()
 
 	// dial client to praefect
 	cc := dialLocalPort(t, port, false)
@@ -233,7 +233,6 @@ func runPraefectServerWithGitalyWithDatastore(t *testing.T, conf config.Config, 
 		ctx, timed := context.WithTimeout(ctx, time.Second)
 		defer timed()
 		require.NoError(t, prf.Shutdown(ctx))
-		require.NoError(t, <-errQ)
 
 		cancel()
 		require.Error(t, context.Canceled, <-errQ)

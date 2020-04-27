@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gitlab.com/gitlab-org/gitaly/internal/praefect/config"
 	"gitlab.com/gitlab-org/gitaly/internal/testhelper"
 )
 
@@ -18,12 +19,13 @@ func ContractTestCountDeadReplicationJobs(t *testing.T, q ReplicationEventQueue)
 	// completed and cancelled jobs in timerange
 	beforeOldest := time.Now()
 
+	const virtual = "praefect"
 	const target = "target"
 	ackJobsToDeath := func(t *testing.T) {
 		t.Helper()
 
 		for {
-			jobs, err := q.Dequeue(ctx, target, 1)
+			jobs, err := q.Dequeue(ctx, virtual, target, 1)
 			require.NoError(t, err)
 			if len(jobs) == 0 {
 				break
@@ -47,17 +49,17 @@ func ContractTestCountDeadReplicationJobs(t *testing.T, q ReplicationEventQueue)
 
 	// add some other job states to the datastore to ensure they are not counted
 	for relPath, state := range map[string]JobState{"repo/completed-job": JobStateCompleted, "repo/cancelled-job": JobStateCancelled} {
-		_, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: relPath, TargetNodeStorage: target}})
+		_, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: relPath, VirtualStorage: virtual, TargetNodeStorage: target}})
 		require.NoError(t, err)
 
-		jobs, err := q.Dequeue(ctx, target, 1)
+		jobs, err := q.Dequeue(ctx, virtual, target, 1)
 		require.NoError(t, err)
 
 		_, err = q.Acknowledge(ctx, state, []uint64{jobs[0].ID})
 		require.NoError(t, err)
 	}
 
-	oldest, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: "old", TargetNodeStorage: target}})
+	oldest, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: "old", VirtualStorage: virtual, TargetNodeStorage: target}})
 	require.NoError(t, err)
 
 	afterOldest := oldest.CreatedAt.Add(tick)
@@ -66,8 +68,9 @@ func ContractTestCountDeadReplicationJobs(t *testing.T, q ReplicationEventQueue)
 	require.NoError(t, err)
 	require.Empty(t, dead, "should not include ready jobs")
 
-	jobs, err := q.Dequeue(ctx, target, 1)
+	jobs, err := q.Dequeue(ctx, virtual, target, 1)
 	require.NoError(t, err)
+	require.Len(t, jobs, 1)
 
 	_, err = q.Acknowledge(ctx, JobStateFailed, []uint64{jobs[0].ID})
 	require.NoError(t, err)
@@ -81,7 +84,7 @@ func ContractTestCountDeadReplicationJobs(t *testing.T, q ReplicationEventQueue)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"old": 1}, dead, "should include dead job")
 
-	middle, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: "new", TargetNodeStorage: target}})
+	middle, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: "new", VirtualStorage: virtual, TargetNodeStorage: target}})
 	require.NoError(t, err)
 
 	ackJobsToDeath(t)
@@ -89,7 +92,7 @@ func ContractTestCountDeadReplicationJobs(t *testing.T, q ReplicationEventQueue)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"old": 1, "new": 1}, dead, "should include both dead jobs")
 
-	newest, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: "new", TargetNodeStorage: target}})
+	newest, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: "new", VirtualStorage: virtual, TargetNodeStorage: target}})
 	require.NoError(t, err)
 
 	ackJobsToDeath(t)
@@ -103,25 +106,26 @@ func ContractTestCountDeadReplicationJobs(t *testing.T, q ReplicationEventQueue)
 }
 
 func TestMemoryCountDeadReplicationJobs(t *testing.T) {
-	ContractTestCountDeadReplicationJobs(t, NewMemoryReplicationEventQueue())
+	ContractTestCountDeadReplicationJobs(t, NewMemoryReplicationEventQueue(config.Config{}))
 }
 
 func TestMemoryCountDeadReplicationJobsLimit(t *testing.T) {
-	q := NewMemoryReplicationEventQueue().(*memoryReplicationEventQueue)
+	q := NewMemoryReplicationEventQueue(config.Config{}).(*memoryReplicationEventQueue)
 	q.maxDeadJobs = 2
 
 	ctx, cancel := testhelper.Context()
 	defer cancel()
 
+	const virtual = "praefect"
 	const target = "target"
 
 	beforeAll := time.Now()
 	for i := 0; i < q.maxDeadJobs+1; i++ {
-		job, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: fmt.Sprintf("job-%d", i), TargetNodeStorage: target}})
+		job, err := q.Enqueue(ctx, ReplicationEvent{Job: ReplicationJob{RelativePath: fmt.Sprintf("job-%d", i), VirtualStorage: virtual, TargetNodeStorage: target}})
 		require.NoError(t, err)
 
 		for i := 0; i < job.Attempt; i++ {
-			_, err := q.Dequeue(ctx, target, 1)
+			_, err := q.Dequeue(ctx, virtual, target, 1)
 			require.NoError(t, err)
 
 			state := JobStateFailed
@@ -143,9 +147,9 @@ func TestMemoryReplicationEventQueue(t *testing.T) {
 	ctx, cancel := testhelper.Context()
 	defer cancel()
 
-	queue := NewMemoryReplicationEventQueue()
+	queue := NewMemoryReplicationEventQueue(config.Config{})
 
-	noEvents, err := queue.Dequeue(ctx, "storage-1", 100500)
+	noEvents, err := queue.Dequeue(ctx, "praefect", "storage-1", 100500)
 	require.NoError(t, err)
 	require.Empty(t, noEvents, "no events as queue is empty")
 
@@ -156,6 +160,7 @@ func TestMemoryReplicationEventQueue(t *testing.T) {
 	job1 := ReplicationJob{
 		Change:            UpdateRepo,
 		RelativePath:      "/project/path-1",
+		VirtualStorage:    "praefect",
 		TargetNodeStorage: "storage-1",
 		SourceNodeStorage: "storage-0",
 		Params:            nil,
@@ -183,6 +188,7 @@ func TestMemoryReplicationEventQueue(t *testing.T) {
 	job2 := ReplicationJob{
 		Change:            UpdateRepo,
 		RelativePath:      "/project/path-1",
+		VirtualStorage:    "praefect",
 		TargetNodeStorage: "storage-2",
 		SourceNodeStorage: "storage-0",
 		Params:            nil,
@@ -202,7 +208,7 @@ func TestMemoryReplicationEventQueue(t *testing.T) {
 	}
 	require.Equal(t, expEvent2, event2)
 
-	dequeuedAttempt1, err := queue.Dequeue(ctx, "storage-1", 100500)
+	dequeuedAttempt1, err := queue.Dequeue(ctx, "praefect", "storage-1", 100500)
 	require.NoError(t, err)
 	require.Len(t, dequeuedAttempt1, 1, "only single event must be fetched for this storage")
 
@@ -221,7 +227,7 @@ func TestMemoryReplicationEventQueue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []uint64{event1.ID}, acknowledgedAttempt1, "one event must be acknowledged")
 
-	dequeuedAttempt2, err := queue.Dequeue(ctx, "storage-1", 100500)
+	dequeuedAttempt2, err := queue.Dequeue(ctx, "praefect", "storage-1", 100500)
 	require.NoError(t, err)
 	require.Len(t, dequeuedAttempt2, 1, "only single event must be fetched for this storage")
 
@@ -240,7 +246,7 @@ func TestMemoryReplicationEventQueue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []uint64{event1.ID}, acknowledgedAttempt2, "one event must be acknowledged")
 
-	dequeuedAttempt3, err := queue.Dequeue(ctx, "storage-1", 100500)
+	dequeuedAttempt3, err := queue.Dequeue(ctx, "praefect", "storage-1", 100500)
 	require.NoError(t, err)
 	require.Len(t, dequeuedAttempt3, 1, "only single event must be fetched for this storage")
 
@@ -263,11 +269,11 @@ func TestMemoryReplicationEventQueue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []uint64{event1.ID}, acknowledgedAttempt3, "one event must be acknowledged")
 
-	dequeuedAttempt4, err := queue.Dequeue(ctx, "storage-1", 100500)
+	dequeuedAttempt4, err := queue.Dequeue(ctx, "praefect", "storage-1", 100500)
 	require.NoError(t, err)
 	require.Empty(t, dequeuedAttempt4, "all attempts to process job were used")
 
-	dequeuedAttempt5, err := queue.Dequeue(ctx, "storage-2", 100500)
+	dequeuedAttempt5, err := queue.Dequeue(ctx, "praefect", "storage-2", 100500)
 	require.NoError(t, err)
 	require.Len(t, dequeuedAttempt5, 1, "only single event must be fetched for this storage")
 
@@ -286,7 +292,7 @@ func TestMemoryReplicationEventQueue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []uint64{event2.ID}, acknowledgedAttempt5, "one event must be acknowledged")
 
-	dequeuedAttempt6, err := queue.Dequeue(ctx, "storage-2", 100500)
+	dequeuedAttempt6, err := queue.Dequeue(ctx, "praefect", "storage-2", 100500)
 	require.NoError(t, err)
 	require.Empty(t, dequeuedAttempt6, "all jobs marked as completed for this storage")
 }
@@ -295,11 +301,12 @@ func TestMemoryReplicationEventQueue_ConcurrentAccess(t *testing.T) {
 	ctx, cancel := testhelper.Context()
 	defer cancel()
 
-	queue := NewMemoryReplicationEventQueue()
+	queue := NewMemoryReplicationEventQueue(config.Config{})
 
 	job1 := ReplicationJob{
 		Change:            UpdateRepo,
 		RelativePath:      "/project/path-1",
+		VirtualStorage:    "praefect",
 		TargetNodeStorage: "storage-1",
 		SourceNodeStorage: "storage-0",
 	}
@@ -307,6 +314,7 @@ func TestMemoryReplicationEventQueue_ConcurrentAccess(t *testing.T) {
 	job2 := ReplicationJob{
 		Change:            UpdateRepo,
 		RelativePath:      "/project/path-1",
+		VirtualStorage:    "praefect",
 		TargetNodeStorage: "storage-2",
 		SourceNodeStorage: "storage-0",
 	}
@@ -320,7 +328,7 @@ func TestMemoryReplicationEventQueue_ConcurrentAccess(t *testing.T) {
 		created, err := queue.Enqueue(ctx, event)
 		require.NoError(t, err)
 
-		dequeued, err := queue.Dequeue(ctx, created.Job.TargetNodeStorage, 100500)
+		dequeued, err := queue.Dequeue(ctx, "praefect", created.Job.TargetNodeStorage, 100500)
 		require.NoError(t, err)
 		require.Len(t, dequeued, 1)
 		require.Equal(t, created.Job, dequeued[0].Job)
@@ -330,7 +338,7 @@ func TestMemoryReplicationEventQueue_ConcurrentAccess(t *testing.T) {
 		require.Len(t, ackIDs, 1)
 		require.Equal(t, created.ID, ackIDs[0])
 
-		nothing, err := queue.Dequeue(ctx, created.Job.TargetNodeStorage, 100500)
+		nothing, err := queue.Dequeue(ctx, "praefect", created.Job.TargetNodeStorage, 100500)
 		require.NoError(t, err)
 		require.Len(t, nothing, 0)
 	}

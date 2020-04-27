@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gitlab.com/gitlab-org/gitaly/client"
 	gconfig "gitlab.com/gitlab-org/gitaly/internal/config"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/config"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/models"
@@ -67,14 +68,18 @@ func TestInfoService_RepositoryReplicas(t *testing.T) {
 	// create a commit in the second replica so we can check that its checksum is different than the primary
 	testhelper.CreateCommit(t, testRepoSecondary2Path, "master", nil)
 
-	client := gitalypb.NewPraefectInfoServiceClient(cc)
+	praefectInfoServiceClient := gitalypb.NewPraefectInfoServiceClient(cc)
 
 	ctx, cancel := testhelper.Context()
 	defer cancel()
 
-	// CalculateChecksum through praefect will get the checksum of the primary
-	repoClient := gitalypb.NewRepositoryServiceClient(cc)
-	checksum, err := repoClient.CalculateChecksum(ctx, &gitalypb.CalculateChecksumRequest{
+	// get the checksum of the primary
+	primaryGitaly, err := client.Dial(conf.VirtualStorages[0].Nodes[0].Address, nil)
+	require.NoError(t, err)
+	defer primaryGitaly.Close()
+
+	primaryGitalyRepoClient := gitalypb.NewRepositoryServiceClient(primaryGitaly)
+	checksum, err := primaryGitalyRepoClient.CalculateChecksum(ctx, &gitalypb.CalculateChecksumRequest{
 		Repository: &gitalypb.Repository{
 			StorageName:  conf.VirtualStorages[0].Name,
 			RelativePath: testRepoPrimary.GetRelativePath(),
@@ -82,7 +87,7 @@ func TestInfoService_RepositoryReplicas(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resp, err := client.RepositoryReplicas(ctx, &gitalypb.RepositoryReplicasRequest{
+	resp, err := praefectInfoServiceClient.RepositoryReplicas(ctx, &gitalypb.RepositoryReplicasRequest{
 		Repository: &gitalypb.Repository{
 			StorageName:  conf.VirtualStorages[0].Name,
 			RelativePath: testRepoPrimary.GetRelativePath(),

@@ -2,12 +2,10 @@ package praefect
 
 import (
 	"context"
-	"io/ioutil"
 	"sync"
 	"testing"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"gitlab.com/gitlab-org/gitaly/internal/middleware/metadatahandler"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/config"
@@ -22,17 +20,11 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-var testLogger = logrus.New()
-
-func init() {
-	testLogger.SetOutput(ioutil.Discard)
-}
-
 func TestSecondaryRotation(t *testing.T) {
 	t.Skip("secondary rotation will change with the new data model")
 }
 
-func TestStreamDirector(t *testing.T) {
+func TestStreamDirectorMutator(t *testing.T) {
 	conf := config.Config{
 		VirtualStorages: []*config.VirtualStorage{
 			&config.VirtualStorage{
@@ -53,7 +45,7 @@ func TestStreamDirector(t *testing.T) {
 
 	var replEventWait sync.WaitGroup
 
-	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue())
+	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue(conf))
 	queueInterceptor.OnEnqueue(func(ctx context.Context, event datastore.ReplicationEvent, queue datastore.ReplicationEventQueue) (datastore.ReplicationEvent, error) {
 		defer replEventWait.Done()
 		return queue.Enqueue(ctx, event)
@@ -76,7 +68,7 @@ func TestStreamDirector(t *testing.T) {
 
 	entry := testhelper.DiscardTestEntry(t)
 
-	nodeMgr, err := nodes.NewManager(entry, conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(entry, conf, nil, ds, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 	r := protoregistry.New()
 	require.NoError(t, r.RegisterFiles(protoregistry.GitalyProtoFileDescriptors...))
@@ -125,7 +117,7 @@ func TestStreamDirector(t *testing.T) {
 	require.NoError(t, err)
 
 	replEventWait.Wait() // wait until event persisted (async operation)
-	events, err := ds.ReplicationEventQueue.Dequeue(ctx, "praefect-internal-2", 10)
+	events, err := ds.ReplicationEventQueue.Dequeue(ctx, "praefect", "praefect-internal-2", 10)
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 
@@ -141,10 +133,82 @@ func TestStreamDirector(t *testing.T) {
 			RelativePath:      targetRepo.RelativePath,
 			TargetNodeStorage: targetNode.Storage,
 			SourceNodeStorage: sourceNode.Storage,
+			VirtualStorage:    "praefect",
 		},
 		Meta: datastore.Params{metadatahandler.CorrelationIDKey: "my-correlation-id"},
 	}
 	require.Equal(t, expectedEvent, events[0], "ensure replication job created by stream director is correct")
+}
+
+func TestStreamDirectorAccessor(t *testing.T) {
+	const replicaAddress = "gitaly-backup1.example.com"
+
+	conf := config.Config{
+		VirtualStorages: []*config.VirtualStorage{
+			{
+				Name: "praefect",
+				Nodes: []*models.Node{
+					{
+						Address:        "tcp://gitaly-primary.example.com",
+						Storage:        "praefect-internal-1",
+						DefaultPrimary: true,
+					},
+					{
+						Address: "tcp://" + replicaAddress,
+						Storage: "praefect-internal-2",
+					}},
+			},
+		},
+	}
+
+	ds := datastore.Datastore{
+		ReplicasDatastore:     datastore.NewInMemory(conf),
+		ReplicationEventQueue: datastore.NewMemoryReplicationEventQueue(conf),
+	}
+
+	targetRepo := gitalypb.Repository{
+		StorageName:  "praefect",
+		RelativePath: "/path/to/hashed/storage",
+	}
+
+	ctx, cancel := testhelper.Context()
+	defer cancel()
+
+	entry := testhelper.DiscardTestEntry(t)
+
+	nodeMgr, err := nodes.NewManager(entry, conf, nil, ds, promtest.NewMockHistogramVec())
+	require.NoError(t, err)
+	r := protoregistry.New()
+	require.NoError(t, r.RegisterFiles(protoregistry.GitalyProtoFileDescriptors...))
+
+	coordinator := NewCoordinator(entry, ds, nodeMgr, conf, r)
+
+	frame, err := proto.Marshal(&gitalypb.FindAllBranchesRequest{Repository: &targetRepo})
+	require.NoError(t, err)
+
+	fullMethod := "/gitaly.RefService/FindAllBranches"
+
+	peeker := &mockPeeker{frame: frame}
+	streamParams, err := coordinator.StreamDirector(correlation.ContextWithCorrelation(ctx, "my-correlation-id"), fullMethod, peeker)
+	require.NoError(t, err)
+	require.Equal(t, replicaAddress, streamParams.Conn().Target())
+
+	md, ok := metadata.FromOutgoingContext(streamParams.Context())
+	require.True(t, ok)
+	require.Contains(t, md, "praefect-server")
+
+	mi, err := coordinator.registry.LookupMethod(fullMethod)
+	require.NoError(t, err)
+
+	m, err := protoMessageFromPeeker(mi, peeker)
+	require.NoError(t, err)
+
+	rewrittenTargetRepo, err := mi.TargetRepo(m)
+	require.NoError(t, err)
+	require.Equal(t, "praefect-internal-2", rewrittenTargetRepo.GetStorageName(), "stream director should have rewritten the storage name")
+
+	// must be invoked without issues
+	streamParams.RequestFinalizer()
 }
 
 type mockPeeker struct {
@@ -182,7 +246,7 @@ func TestAbsentCorrelationID(t *testing.T) {
 
 	var replEventWait sync.WaitGroup
 
-	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue())
+	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue(conf))
 	queueInterceptor.OnEnqueue(func(ctx context.Context, event datastore.ReplicationEvent, queue datastore.ReplicationEventQueue) (datastore.ReplicationEvent, error) {
 		defer replEventWait.Done()
 		return queue.Enqueue(ctx, event)
@@ -205,7 +269,7 @@ func TestAbsentCorrelationID(t *testing.T) {
 
 	entry := testhelper.DiscardTestEntry(t)
 
-	nodeMgr, err := nodes.NewManager(entry, conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(entry, conf, nil, ds, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 
 	coordinator := NewCoordinator(entry, ds, nodeMgr, conf, protoregistry.GitalyProtoPreregistered)
@@ -228,7 +292,7 @@ func TestAbsentCorrelationID(t *testing.T) {
 	streamParams.RequestFinalizer()
 
 	replEventWait.Wait() // wait until event persisted (async operation)
-	jobs, err := coordinator.datastore.Dequeue(ctx, conf.VirtualStorages[0].Nodes[1].Storage, 1)
+	jobs, err := coordinator.datastore.Dequeue(ctx, conf.VirtualStorages[0].Name, conf.VirtualStorages[0].Nodes[1].Storage, 1)
 	require.NoError(t, err)
 	require.Len(t, jobs, 1)
 

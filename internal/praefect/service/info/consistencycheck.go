@@ -137,9 +137,10 @@ type checksumResult struct {
 	reference        string
 	targetStorage    string
 	referenceStorage string
+	virtualStorage   string
 }
 
-func checksumRepos(ctx context.Context, relpathQ <-chan string, checksumResultQ chan<- checksumResult, target, reference nodes.Node) error {
+func checksumRepos(ctx context.Context, relpathQ <-chan string, checksumResultQ chan<- checksumResult, target, reference nodes.Node, virtualStorage string) error {
 	defer close(checksumResultQ)
 
 	for repoRelPath := range relpathQ {
@@ -147,6 +148,7 @@ func checksumRepos(ctx context.Context, relpathQ <-chan string, checksumResultQ 
 			relativePath:     repoRelPath,
 			targetStorage:    target.GetStorage(),
 			referenceStorage: reference.GetStorage(),
+			virtualStorage:   virtualStorage,
 		}
 
 		g, ctx := errgroup.WithContext(ctx)
@@ -183,6 +185,7 @@ func scheduleReplication(ctx context.Context, csr checksumResult, q Queue, resp 
 			RelativePath:      csr.relativePath,
 			TargetNodeStorage: csr.targetStorage,
 			SourceNodeStorage: csr.referenceStorage,
+			VirtualStorage:    csr.virtualStorage,
 		},
 		Meta: datastore.Params{metadatahandler.CorrelationIDKey: correlation.ExtractFromContext(ctx)},
 	})
@@ -247,7 +250,7 @@ func (s *Server) ConsistencyCheck(req *gitalypb.ConsistencyCheckRequest, stream 
 		return walkRepos(ctx, walkerQ, reference)
 	})
 	g.Go(func() error {
-		return checksumRepos(ctx, walkerQ, checksumResultQ, target, reference)
+		return checksumRepos(ctx, walkerQ, checksumResultQ, target, reference, req.GetVirtualStorage())
 	})
 	g.Go(func() error {
 		return ensureConsistency(ctx, checksumResultQ, s.queue, stream)

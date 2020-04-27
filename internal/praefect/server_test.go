@@ -151,7 +151,7 @@ func TestGitalyServerInfoBadNode(t *testing.T) {
 	}
 
 	entry := testhelper.DiscardTestEntry(t)
-	nodeMgr, err := nodes.NewManager(entry, conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(entry, conf, nil, datastore.Datastore{}, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 
 	registry := protoregistry.New()
@@ -431,7 +431,7 @@ func TestRepoRemoval(t *testing.T) {
 
 	// TODO: once https://gitlab.com/gitlab-org/gitaly/-/issues/2703 is done and the replication manager supports
 	// graceful shutdown, we can remove this code that waits for jobs to be complete
-	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue())
+	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue(conf))
 	ds := datastore.Datastore{
 		ReplicasDatastore:     datastore.NewInMemory(conf),
 		ReplicationEventQueue: queueInterceptor,

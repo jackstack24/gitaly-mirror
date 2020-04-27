@@ -329,12 +329,13 @@ func WithReplicator(r Replicator) ReplMgrOpt {
 }
 
 const (
-	logWithReplJobID  = "replication_job_id"
-	logWithReplSource = "replication_job_source"
-	logWithReplTarget = "replication_job_target"
-	logWithReplChange = "replication_job_change"
-	logWithReplPath   = "replication_job_path"
-	logWithCorrID     = "replication_correlation_id"
+	logWithReplJobID   = "replication_job_id"
+	logWithReplVirtual = "replication_job_virtual"
+	logWithReplSource  = "replication_job_source"
+	logWithReplTarget  = "replication_job_target"
+	logWithReplChange  = "replication_job_change"
+	logWithReplPath    = "replication_job_path"
+	logWithCorrID      = "replication_correlation_id"
 )
 
 type backoff func() time.Duration
@@ -404,6 +405,7 @@ func (r ReplMgr) createReplJob(event datastore.ReplicationEvent) (datastore.Repl
 		Attempts:      event.Attempt,
 		Change:        event.Job.Change,
 		ID:            event.ID,
+		Virtual:       event.Job.VirtualStorage,
 		TargetNode:    targetNode,
 		SourceNode:    sourceNode,
 		RelativePath:  event.Job.RelativePath,
@@ -416,7 +418,11 @@ func (r ReplMgr) createReplJob(event datastore.ReplicationEvent) (datastore.Repl
 }
 
 // ProcessBacklog will process queued jobs. It will block while processing jobs.
-func (r ReplMgr) ProcessBacklog(ctx context.Context, b BackoffFunc) error {
+func (r ReplMgr) ProcessBacklog(ctx context.Context, b BackoffFunc) {
+	r.processVirtualBacklog(ctx, b, r.virtualStorage)
+}
+
+func (r ReplMgr) processVirtualBacklog(ctx context.Context, b BackoffFunc, virtualStorage string) {
 	backoff, reset := b()
 
 	for {
@@ -424,7 +430,7 @@ func (r ReplMgr) ProcessBacklog(ctx context.Context, b BackoffFunc) error {
 		primary, secondaries, err := r.getPrimaryAndSecondaries()
 		if err == nil {
 			for _, secondary := range secondaries {
-				events, err := r.datastore.Dequeue(ctx, secondary.GetStorage(), 10)
+				events, err := r.datastore.Dequeue(ctx, virtualStorage, secondary.GetStorage(), 10)
 				if err != nil {
 					r.log.WithField(logWithReplTarget, secondary.GetStorage()).WithError(err).Error("failed to dequeue replication events")
 					continue
@@ -442,12 +448,13 @@ func (r ReplMgr) ProcessBacklog(ctx context.Context, b BackoffFunc) error {
 					}
 					if err := r.processReplJob(ctx, job, primary.GetConnection(), secondary.GetConnection()); err != nil {
 						r.log.WithFields(logrus.Fields{
-							logWithReplJobID:  job.ID,
-							logWithReplTarget: job.TargetNode.Storage,
-							logWithReplSource: job.SourceNode.Storage,
-							logWithReplChange: job.Change,
-							logWithReplPath:   job.RelativePath,
-							logWithCorrID:     job.CorrelationID,
+							logWithReplJobID:   job.ID,
+							logWithReplVirtual: job.Virtual,
+							logWithReplTarget:  job.TargetNode.Storage,
+							logWithReplSource:  job.SourceNode.Storage,
+							logWithReplChange:  job.Change,
+							logWithReplPath:    job.RelativePath,
+							logWithCorrID:      job.CorrelationID,
 						}).WithError(err).Error("replication job failed")
 						if job.Attempts == 0 {
 							eventIDsByState[datastore.JobStateDead] = append(eventIDsByState[datastore.JobStateDead], event.ID)
@@ -480,7 +487,7 @@ func (r ReplMgr) ProcessBacklog(ctx context.Context, b BackoffFunc) error {
 			case <-time.After(backoff()):
 				continue
 			case <-ctx.Done():
-				return ctx.Err()
+				return
 			}
 		}
 
@@ -491,6 +498,7 @@ func (r ReplMgr) ProcessBacklog(ctx context.Context, b BackoffFunc) error {
 func (r ReplMgr) processReplJob(ctx context.Context, job datastore.ReplJob, sourceCC, targetCC *grpc.ClientConn) error {
 	l := r.log.
 		WithField(logWithReplJobID, job.ID).
+		WithField(logWithReplVirtual, job.Virtual).
 		WithField(logWithReplSource, job.SourceNode).
 		WithField(logWithReplTarget, job.TargetNode).
 		WithField(logWithReplPath, job.RelativePath).

@@ -222,7 +222,14 @@ func run(cfgs []starter.Config, conf config.Config) error {
 		db = dbConn
 	}
 
-	nodeManager, err := nodes.NewManager(logger, conf, db, nodeLatencyHistogram)
+	ds := datastore.Datastore{ReplicasDatastore: datastore.NewInMemory(conf)}
+	if conf.PostgresQueueEnabled {
+		ds.ReplicationEventQueue = datastore.NewPostgresReplicationEventQueue(db)
+	} else {
+		ds.ReplicationEventQueue = datastore.NewMemoryReplicationEventQueue(conf)
+	}
+
+	nodeManager, err := nodes.NewManager(logger, conf, db, ds, nodeLatencyHistogram)
 	if err != nil {
 		return err
 	}
@@ -231,16 +238,6 @@ func run(cfgs []starter.Config, conf config.Config) error {
 	registry := protoregistry.New()
 	if err = registry.RegisterFiles(protoregistry.GitalyProtoFileDescriptors...); err != nil {
 		return err
-	}
-
-	ds := datastore.Datastore{
-		ReplicasDatastore: datastore.NewInMemory(conf),
-	}
-
-	if conf.PostgresQueueEnabled {
-		ds.ReplicationEventQueue = datastore.NewPostgresReplicationEventQueue(db)
-	} else {
-		ds.ReplicationEventQueue = datastore.NewMemoryReplicationEventQueue()
 	}
 
 	var (
@@ -255,8 +252,6 @@ func run(cfgs []starter.Config, conf config.Config) error {
 			praefect.WithLatencyMetric(latencyMetric),
 			praefect.WithQueueMetric(queueMetric))
 		srv = praefect.NewServer(coordinator.StreamDirector, logger, registry, conf)
-
-		serverErrors = make(chan error, 1)
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -278,12 +273,9 @@ func run(cfgs []starter.Config, conf config.Config) error {
 		return fmt.Errorf("unable to start the bootstrap: %v", err)
 	}
 
-	go func() { serverErrors <- b.Wait() }()
-	go func() {
-		serverErrors <- repl.ProcessBacklog(ctx, praefect.ExpBackoffFunc(1*time.Second, 5*time.Second))
-	}()
+	go func() { repl.ProcessBacklog(ctx, praefect.ExpBackoffFunc(1*time.Second, 5*time.Second)) }()
 
-	return <-serverErrors
+	return b.Wait()
 }
 
 func getStarterConfigs(socketPath, listenAddr string) ([]starter.Config, error) {

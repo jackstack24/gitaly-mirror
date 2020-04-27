@@ -96,6 +96,7 @@ func (p Params) Value() (driver.Value, error) {
 type ReplJob struct {
 	Change                 ChangeType
 	ID                     uint64      // autoincrement ID
+	Virtual                string      // virtual storage
 	TargetNode, SourceNode models.Node // which node to replicate to?
 	RelativePath           string      // source for replication
 	State                  JobState

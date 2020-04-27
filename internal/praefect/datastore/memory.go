@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"gitlab.com/gitlab-org/gitaly/internal/praefect/config"
 )
 
 var (
@@ -13,10 +15,20 @@ var (
 )
 
 // NewMemoryReplicationEventQueue return in-memory implementation of the ReplicationEventQueue.
-func NewMemoryReplicationEventQueue() ReplicationEventQueue {
+func NewMemoryReplicationEventQueue(conf config.Config) ReplicationEventQueue {
+	storageNamesByVirtualStorage := make(map[string][]string, len(conf.VirtualStorages))
+	for _, vs := range conf.VirtualStorages {
+		storages := make([]string, len(vs.Nodes))
+		for i, node := range vs.Nodes {
+			storages[i] = node.Storage
+		}
+		storageNamesByVirtualStorage[vs.Name] = storages
+	}
 	return &memoryReplicationEventQueue{
-		dequeued:    map[uint64]struct{}{},
-		maxDeadJobs: 1000,
+		dequeued:                     map[uint64]struct{}{},
+		maxDeadJobs:                  1000,
+		storageNamesByVirtualStorage: storageNamesByVirtualStorage,
+		lastEventByDest:              map[eventDestination]ReplicationEvent{},
 	}
 }
 
@@ -25,14 +37,20 @@ type deadJob struct {
 	relativePath string
 }
 
+type eventDestination struct {
+	virtual, storage, relativePath string
+}
+
 // memoryReplicationEventQueue implements queue interface with in-memory implementation of storage
 type memoryReplicationEventQueue struct {
 	sync.RWMutex
-	seq         uint64              // used to generate unique  identifiers for events
-	queued      []ReplicationEvent  // all new events stored as queue
-	dequeued    map[uint64]struct{} // all events dequeued, but not yet acknowledged
-	maxDeadJobs int                 // maximum amount of dead jobs to hold in memory
-	deadJobs    []deadJob           // dead jobs stored for reporting purposes
+	seq                          uint64                                // used to generate unique  identifiers for events
+	queued                       []ReplicationEvent                    // all new events stored as queue
+	dequeued                     map[uint64]struct{}                   // all events dequeued, but not yet acknowledged
+	maxDeadJobs                  int                                   // maximum amount of dead jobs to hold in memory
+	deadJobs                     []deadJob                             // dead jobs stored for reporting purposes
+	storageNamesByVirtualStorage map[string][]string                   // bindings between virtual storage and storages behind them
+	lastEventByDest              map[eventDestination]ReplicationEvent // contains 'virtual+storage+repo' => 'last even' mappings
 }
 
 // nextID returns a new sequential ID for new events.
@@ -49,15 +67,17 @@ func (s *memoryReplicationEventQueue) Enqueue(_ context.Context, event Replicati
 	// event.LockID is unnecessary with an in memory data store as it is intended to synchronize multiple praefect instances
 	// but must be filled out to produce same event as it done by SQL implementation
 	event.LockID = event.Job.TargetNodeStorage + "|" + event.Job.RelativePath
+	dest := s.defineDest(event)
 
 	s.Lock()
 	defer s.Unlock()
 	event.ID = s.nextID()
 	s.queued = append(s.queued, event)
+	s.lastEventByDest[dest] = event
 	return event, nil
 }
 
-func (s *memoryReplicationEventQueue) Dequeue(_ context.Context, nodeStorage string, count int) ([]ReplicationEvent, error) {
+func (s *memoryReplicationEventQueue) Dequeue(_ context.Context, virtualStorage, nodeStorage string, count int) ([]ReplicationEvent, error) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -65,10 +85,11 @@ func (s *memoryReplicationEventQueue) Dequeue(_ context.Context, nodeStorage str
 	for i := 0; i < len(s.queued); i++ {
 		event := s.queued[i]
 
+		isForVirtual := event.Job.VirtualStorage == virtualStorage
 		isForTargetStorage := event.Job.TargetNodeStorage == nodeStorage
 		isReadyOrFailed := event.State == JobStateReady || event.State == JobStateFailed
 
-		if isForTargetStorage && isReadyOrFailed {
+		if isForVirtual && isForTargetStorage && isReadyOrFailed {
 			updatedAt := time.Now().UTC()
 			event.Attempt--
 			event.State = JobStateInProgress
@@ -76,6 +97,10 @@ func (s *memoryReplicationEventQueue) Dequeue(_ context.Context, nodeStorage str
 
 			s.queued[i] = event
 			s.dequeued[event.ID] = struct{}{}
+			eventDest := s.defineDest(event)
+			if last, found := s.lastEventByDest[eventDest]; found && last.ID == event.ID {
+				s.lastEventByDest[eventDest] = event
+			}
 			result = append(result, event)
 
 			if len(result) >= count {
@@ -122,7 +147,10 @@ func (s *memoryReplicationEventQueue) Acknowledge(_ context.Context, state JobSt
 			updatedAt := time.Now().UTC()
 			s.queued[i].State = state
 			s.queued[i].UpdatedAt = &updatedAt
-
+			eventDest := s.defineDest(s.queued[i])
+			if last, found := s.lastEventByDest[eventDest]; found && last.ID == s.queued[i].ID {
+				s.lastEventByDest[eventDest] = s.queued[i]
+			}
 			result = append(result, id)
 
 			switch state {
@@ -155,6 +183,30 @@ func (s *memoryReplicationEventQueue) CountDeadReplicationJobs(ctx context.Conte
 	return dead, nil
 }
 
+func (s *memoryReplicationEventQueue) GetUpToDateStorages(_ context.Context, virtualStorage, repoPath string) ([]string, error) {
+	s.RLock()
+	dirtyStorages := make(map[string]struct{})
+	for dst, event := range s.lastEventByDest {
+		if dst.virtual == virtualStorage && dst.relativePath == repoPath && event.State != JobStateCompleted {
+			dirtyStorages[event.Job.TargetNodeStorage] = struct{}{}
+		}
+	}
+	s.RUnlock()
+
+	storageNames, found := s.storageNamesByVirtualStorage[virtualStorage]
+	if !found {
+		return nil, fmt.Errorf("unknown virtual storage: %q", virtualStorage)
+	}
+
+	var result []string
+	for _, storage := range storageNames {
+		if _, found := dirtyStorages[storage]; !found {
+			result = append(result, storage)
+		}
+	}
+	return result, nil
+}
+
 // remove deletes i-th element from the queue and from the in-flight tracking map.
 // It doesn't check 'i' for the out of range and must be called with lock protection.
 // If state is JobStateDead, the event will be added to the dead job tracker.
@@ -174,6 +226,10 @@ func (s *memoryReplicationEventQueue) remove(i int, state JobState) {
 	s.queued = append(s.queued[:i], s.queued[i+1:]...)
 }
 
+func (s *memoryReplicationEventQueue) defineDest(event ReplicationEvent) eventDestination {
+	return eventDestination{virtual: event.Job.VirtualStorage, storage: event.Job.TargetNodeStorage, relativePath: event.Job.RelativePath}
+}
+
 // ReplicationEventQueueInterceptor allows to register interceptors for `ReplicationEventQueue` interface.
 type ReplicationEventQueueInterceptor interface {
 	// ReplicationEventQueue actual implementation.
@@ -181,7 +237,7 @@ type ReplicationEventQueueInterceptor interface {
 	// OnEnqueue allows to set action that would be executed each time when `Enqueue` method called.
 	OnEnqueue(func(context.Context, ReplicationEvent, ReplicationEventQueue) (ReplicationEvent, error))
 	// OnDequeue allows to set action that would be executed each time when `Dequeue` method called.
-	OnDequeue(func(context.Context, string, int, ReplicationEventQueue) ([]ReplicationEvent, error))
+	OnDequeue(func(context.Context, string, string, int, ReplicationEventQueue) ([]ReplicationEvent, error))
 	// OnAcknowledge allows to set action that would be executed each time when `Acknowledge` method called.
 	OnAcknowledge(func(context.Context, JobState, []uint64, ReplicationEventQueue) ([]uint64, error))
 }
@@ -194,7 +250,7 @@ func NewReplicationEventQueueInterceptor(queue ReplicationEventQueue) Replicatio
 type replicationEventQueueInterceptor struct {
 	ReplicationEventQueue
 	onEnqueue     func(context.Context, ReplicationEvent, ReplicationEventQueue) (ReplicationEvent, error)
-	onDequeue     func(context.Context, string, int, ReplicationEventQueue) ([]ReplicationEvent, error)
+	onDequeue     func(context.Context, string, string, int, ReplicationEventQueue) ([]ReplicationEvent, error)
 	onAcknowledge func(context.Context, JobState, []uint64, ReplicationEventQueue) ([]uint64, error)
 }
 
@@ -202,7 +258,7 @@ func (i *replicationEventQueueInterceptor) OnEnqueue(action func(context.Context
 	i.onEnqueue = action
 }
 
-func (i *replicationEventQueueInterceptor) OnDequeue(action func(context.Context, string, int, ReplicationEventQueue) ([]ReplicationEvent, error)) {
+func (i *replicationEventQueueInterceptor) OnDequeue(action func(context.Context, string, string, int, ReplicationEventQueue) ([]ReplicationEvent, error)) {
 	i.onDequeue = action
 }
 
@@ -217,11 +273,11 @@ func (i *replicationEventQueueInterceptor) Enqueue(ctx context.Context, event Re
 	return i.ReplicationEventQueue.Enqueue(ctx, event)
 }
 
-func (i *replicationEventQueueInterceptor) Dequeue(ctx context.Context, nodeStorage string, count int) ([]ReplicationEvent, error) {
+func (i *replicationEventQueueInterceptor) Dequeue(ctx context.Context, virtualStorage, nodeStorage string, count int) ([]ReplicationEvent, error) {
 	if i.onDequeue != nil {
-		return i.onDequeue(ctx, nodeStorage, count, i.ReplicationEventQueue)
+		return i.onDequeue(ctx, virtualStorage, nodeStorage, count, i.ReplicationEventQueue)
 	}
-	return i.ReplicationEventQueue.Dequeue(ctx, nodeStorage, count)
+	return i.ReplicationEventQueue.Dequeue(ctx, virtualStorage, nodeStorage, count)
 }
 
 func (i *replicationEventQueueInterceptor) Acknowledge(ctx context.Context, state JobState, ids []uint64) ([]uint64, error) {

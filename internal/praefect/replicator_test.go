@@ -89,7 +89,7 @@ func TestProcessReplicationJob(t *testing.T) {
 
 	ds := datastore.Datastore{
 		ReplicasDatastore:     datastore.NewInMemory(conf),
-		ReplicationEventQueue: datastore.NewMemoryReplicationEventQueue(),
+		ReplicationEventQueue: datastore.NewMemoryReplicationEventQueue(conf),
 	}
 
 	// create object pool on the source
@@ -148,7 +148,7 @@ func TestProcessReplicationJob(t *testing.T) {
 	entry := testhelper.DiscardTestEntry(t)
 	replicator.log = entry
 
-	nodeMgr, err := nodes.NewManager(entry, conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(entry, conf, nil, ds, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 	nodeMgr.Start(1*time.Millisecond, 5*time.Millisecond)
 
@@ -221,11 +221,11 @@ func TestPropagateReplicationJob(t *testing.T) {
 
 	ds := datastore.Datastore{
 		ReplicasDatastore:     datastore.NewInMemory(conf),
-		ReplicationEventQueue: datastore.NewMemoryReplicationEventQueue(),
+		ReplicationEventQueue: datastore.NewMemoryReplicationEventQueue(conf),
 	}
 	logEntry := testhelper.DiscardTestEntry(t)
 
-	nodeMgr, err := nodes.NewManager(logEntry, conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(logEntry, conf, nil, ds, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 	nodeMgr.Start(1*time.Millisecond, 5*time.Millisecond)
 
@@ -443,7 +443,7 @@ func TestProcessBacklog_FailedJobs(t *testing.T) {
 	conf := config.Config{
 		VirtualStorages: []*config.VirtualStorage{
 			{
-				Name: "default",
+				Name: "praefect",
 				Nodes: []*models.Node{
 					&primary,
 					&secondary,
@@ -464,12 +464,12 @@ func TestProcessBacklog_FailedJobs(t *testing.T) {
 
 	require.Len(t, gitaly_config.Config.Storages, 2, "expected 'default' storage and a new one")
 
-	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue())
+	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue(conf))
 	processed := make(chan struct{})
 
 	dequeues := 0
-	queueInterceptor.OnDequeue(func(ctx context.Context, target string, count int, queue datastore.ReplicationEventQueue) ([]datastore.ReplicationEvent, error) {
-		events, err := queue.Dequeue(ctx, target, count)
+	queueInterceptor.OnDequeue(func(ctx context.Context, virtual, target string, count int, queue datastore.ReplicationEventQueue) ([]datastore.ReplicationEvent, error) {
+		events, err := queue.Dequeue(ctx, virtual, target, count)
 		if len(events) > 0 {
 			dequeues++
 		}
@@ -512,6 +512,7 @@ func TestProcessBacklog_FailedJobs(t *testing.T) {
 		RelativePath:      testRepo.RelativePath,
 		TargetNodeStorage: secondary.Storage,
 		SourceNodeStorage: primary.Storage,
+		VirtualStorage:    "praefect",
 	}
 	event1, err := ds.ReplicationEventQueue.Enqueue(ctx, datastore.ReplicationEvent{Job: okJob})
 	require.NoError(t, err)
@@ -526,13 +527,13 @@ func TestProcessBacklog_FailedJobs(t *testing.T) {
 
 	logEntry := testhelper.DiscardTestEntry(t)
 
-	nodeMgr, err := nodes.NewManager(logEntry, conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(logEntry, conf, nil, ds, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 
-	replMgr := NewReplMgr("default", logEntry, ds, nodeMgr)
+	replMgr := NewReplMgr("praefect", logEntry, ds, nodeMgr)
 
 	go func() {
-		require.Equal(t, context.Canceled, replMgr.ProcessBacklog(ctx, noopBackoffFunc), "backlog processing failed")
+		replMgr.ProcessBacklog(ctx, noopBackoffFunc)
 	}()
 
 	select {
@@ -593,7 +594,7 @@ func TestProcessBacklog_Success(t *testing.T) {
 	})
 	require.Len(t, gitaly_config.Config.Storages, 2, "expected 'default' storage and a new one")
 
-	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue())
+	queueInterceptor := datastore.NewReplicationEventQueueInterceptor(datastore.NewMemoryReplicationEventQueue(conf))
 
 	processed := make(chan struct{})
 	queueInterceptor.OnAcknowledge(func(ctx context.Context, state datastore.JobState, ids []uint64, queue datastore.ReplicationEventQueue) ([]uint64, error) {
@@ -618,6 +619,7 @@ func TestProcessBacklog_Success(t *testing.T) {
 			RelativePath:      testRepo.GetRelativePath(),
 			TargetNodeStorage: secondary.Storage,
 			SourceNodeStorage: primary.Storage,
+			VirtualStorage:    conf.VirtualStorages[0].Name,
 		},
 	}
 
@@ -640,6 +642,7 @@ func TestProcessBacklog_Success(t *testing.T) {
 			RelativePath:      testRepo.GetRelativePath(),
 			TargetNodeStorage: secondary.Storage,
 			SourceNodeStorage: primary.Storage,
+			VirtualStorage:    conf.VirtualStorages[0].Name,
 			Params:            datastore.Params{"RelativePath": renameTo1},
 		},
 	}
@@ -654,6 +657,7 @@ func TestProcessBacklog_Success(t *testing.T) {
 			RelativePath:      renameTo1,
 			TargetNodeStorage: secondary.Storage,
 			SourceNodeStorage: primary.Storage,
+			VirtualStorage:    conf.VirtualStorages[0].Name,
 			Params:            datastore.Params{"RelativePath": renameTo2},
 		},
 	}
@@ -664,13 +668,13 @@ func TestProcessBacklog_Success(t *testing.T) {
 
 	logEntry := testhelper.DiscardTestEntry(t)
 
-	nodeMgr, err := nodes.NewManager(logEntry, conf, nil, promtest.NewMockHistogramVec())
+	nodeMgr, err := nodes.NewManager(logEntry, conf, nil, ds, promtest.NewMockHistogramVec())
 	require.NoError(t, err)
 
 	replMgr := NewReplMgr(conf.VirtualStorages[0].Name, logEntry, ds, nodeMgr)
 
 	go func() {
-		require.Equal(t, context.Canceled, replMgr.ProcessBacklog(ctx, noopBackoffFunc), "backlog processing failed")
+		replMgr.ProcessBacklog(ctx, noopBackoffFunc)
 	}()
 
 	select {
