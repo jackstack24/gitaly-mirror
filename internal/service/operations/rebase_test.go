@@ -3,6 +3,7 @@ package operations_test
 //lint:file-ignore SA1019 due to planned removal in issue https://gitlab.com/gitlab-org/gitaly/issues/1628
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,10 +30,16 @@ var (
 )
 
 func TestSuccessfulUserRebaseConfirmableRequest(t *testing.T) {
-	pushOptions := []string{"ci.skip", "test=value"}
+	for _, featureFlagBitmask := range operations.FeatureFlagsBitmasks {
+		ctx, cancel := operations.ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
 
-	ctxOuter, cancel := testhelper.Context()
-	defer cancel()
+		testSuccessfulUserRebaseConfirmableRequest(t, ctx)
+	}
+}
+
+func testSuccessfulUserRebaseConfirmableRequest(t *testing.T, ctxOuter context.Context) {
+	pushOptions := []string{"ci.skip", "test=value"}
 
 	server, serverSocketPath := runFullServerWithHooks(t)
 	defer server.Stop()

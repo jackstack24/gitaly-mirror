@@ -12,10 +12,16 @@ import (
 	"google.golang.org/grpc/codes"
 )
 
-func TestSuccessfulUserCreateBranchRequest(t *testing.T) {
-	ctx, cancel := testhelper.Context()
-	defer cancel()
+func TestSuccessfulCreateBranchRequest(t *testing.T) {
+	for _, featureFlagBitmask := range FeatureFlagsBitmasks {
+		ctx, cancel := ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
 
+		testSuccessfulUserCreateBranchRequest(t, ctx)
+	}
+}
+
+func testSuccessfulUserCreateBranchRequest(t *testing.T, ctx context.Context) {
 	testRepo, testRepoPath, cleanupFn := testhelper.NewTestRepo(t)
 	defer cleanupFn()
 

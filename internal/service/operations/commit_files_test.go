@@ -1,6 +1,7 @@
 package operations_test
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"testing"
@@ -24,7 +25,7 @@ var (
 	commitFilesMessage = []byte("Change files")
 )
 
-func TestSuccessfulUserCommitFilesRequest(t *testing.T) {
+func testSuccessfulUserCommitFilesRequest(t *testing.T, ctxWithFeatureFlags context.Context) {
 	testRepo, testRepoPath, cleanup := testhelper.NewTestRepo(t)
 	defer cleanup()
 
@@ -36,9 +37,6 @@ func TestSuccessfulUserCommitFilesRequest(t *testing.T) {
 
 	client, conn := operations.NewOperationClient(t, serverSocketPath)
 	defer conn.Close()
-
-	ctxOuter, cancel := testhelper.Context()
-	defer cancel()
 
 	newRepo, newRepoPath, newRepoCleanupFn := testhelper.InitBareRepo(t)
 	defer newRepoCleanupFn()
@@ -93,7 +91,7 @@ func TestSuccessfulUserCommitFilesRequest(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			ctx := metadata.NewOutgoingContext(ctxOuter, md)
+			ctx := metadata.NewOutgoingContext(ctxWithFeatureFlags, md)
 			headerRequest := headerRequest(tc.repo, user, tc.branchName, commitFilesMessage)
 			setAuthorAndEmail(headerRequest, authorName, authorEmail)
 
@@ -115,7 +113,7 @@ func TestSuccessfulUserCommitFilesRequest(t *testing.T) {
 			require.Equal(t, tc.repoCreated, resp.GetBranchUpdate().GetRepoCreated())
 			require.Equal(t, tc.branchCreated, resp.GetBranchUpdate().GetBranchCreated())
 
-			headCommit, err := log.GetCommit(ctxOuter, tc.repo, tc.branchName)
+			headCommit, err := log.GetCommit(ctxWithFeatureFlags, tc.repo, tc.branchName)
 			require.NoError(t, err)
 			require.Equal(t, authorName, headCommit.Author.Name)
 			require.Equal(t, user.Name, headCommit.Committer.Name)
@@ -133,6 +131,15 @@ func TestSuccessfulUserCommitFilesRequest(t *testing.T) {
 			}
 			require.Contains(t, string(commitInfo), fmt.Sprint("new file mode ", expectedFilemode))
 		})
+	}
+}
+
+func TestSuccessfulUserCommitFilesRequest(t *testing.T) {
+	for _, featureFlagBitmask := range operations.FeatureFlagsBitmasks {
+		ctx, cancel := operations.ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
+
+		testSuccessfulUserCommitFilesRequest(t, ctx)
 	}
 }
 

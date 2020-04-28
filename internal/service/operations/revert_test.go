@@ -1,6 +1,7 @@
 package operations_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,15 @@ import (
 )
 
 func TestSuccessfulUserRevertRequest(t *testing.T) {
+	for _, featureFlagBitmask := range operations.FeatureFlagsBitmasks {
+		ctx, cancel := operations.ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
+
+		testSuccessfulUserRevertRequest(t, ctx)
+	}
+}
+
+func testSuccessfulUserRevertRequest(t *testing.T, ctxOuter context.Context) {
 	ctxOuter, cancel := testhelper.Context()
 	defer cancel()
 

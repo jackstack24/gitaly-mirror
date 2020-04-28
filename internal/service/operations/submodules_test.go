@@ -2,6 +2,7 @@ package operations
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
 
@@ -14,6 +15,15 @@ import (
 )
 
 func TestSuccessfulUserUpdateSubmoduleRequest(t *testing.T) {
+	for _, featureFlagBitmask := range FeatureFlagsBitmasks {
+		ctx, cancel := ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
+
+		testSuccessfulUserUpdateSubmoduleRequest(t, ctx)
+	}
+}
+
+func testSuccessfulUserUpdateSubmoduleRequest(t *testing.T, ctx context.Context) {
 	serverSocketPath, stop := runOperationServiceServer(t)
 	defer stop()
 
@@ -50,9 +60,6 @@ func TestSuccessfulUserUpdateSubmoduleRequest(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.desc, func(t *testing.T) {
-			ctx, cancel := testhelper.Context()
-			defer cancel()
-
 			request := &gitalypb.UserUpdateSubmoduleRequest{
 				Repository:    testRepo,
 				User:          user,

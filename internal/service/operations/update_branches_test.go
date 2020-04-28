@@ -20,9 +20,15 @@ var (
 )
 
 func TestSuccessfulUserUpdateBranchRequest(t *testing.T) {
-	ctx, cancel := testhelper.Context()
-	defer cancel()
+	for _, featureFlagBitmask := range FeatureFlagsBitmasks {
+		ctx, cancel := ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
 
+		testSuccessfulUserUpdateBranchRequest(t, ctx)
+	}
+}
+
+func testSuccessfulUserUpdateBranchRequest(t *testing.T, ctx context.Context) {
 	testRepo, _, cleanupFn := testhelper.NewTestRepo(t)
 	defer cleanupFn()
 

@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os/exec"
@@ -29,9 +30,15 @@ var (
 )
 
 func TestSuccessfulMerge(t *testing.T) {
-	ctx, cancel := testhelper.Context()
-	defer cancel()
+	for _, featureFlagBitmask := range FeatureFlagsBitmasks {
+		ctx, cancel := ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
 
+		testSuccessfulMerge(t, ctx)
+	}
+}
+
+func testSuccessfulMerge(t *testing.T, ctx context.Context) {
 	testRepo, testRepoPath, cleanupFn := testhelper.NewTestRepo(t)
 	defer cleanupFn()
 

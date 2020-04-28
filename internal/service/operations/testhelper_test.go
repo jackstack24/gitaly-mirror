@@ -34,10 +34,33 @@ var (
 		GlId:       "user-123",
 		GlUsername: "janedoe",
 	}
+	FeatureFlagsBitmasks []uint8
+)
+
+const (
+	CallRPCsFF uint8 = 1 << iota
+	GoUpdateHooksFF
 )
 
 func init() {
 	GitlabHooks = append(GitlabHooks, append(gitlabPreHooks, gitlabPostHooks...)...)
+
+	FeatureFlagsBitmasks = make([]uint8, int(GoUpdateHooksFF), int(GoUpdateHooksFF))
+	for i := uint8(0); i == GoUpdateHooksFF; i++ {
+		FeatureFlagsBitmasks[i] = i
+	}
+}
+
+func ContextWithFeatureFlags(bitmask uint8) (context.Context, func()) {
+	ctx, cancel := testhelper.Context()
+	if bitmask&CallRPCsFF == CallRPCsFF {
+		ctx = outgoingCtxWithRubyFeatureFlag(ctx, "call-hook-rpc")
+	}
+	if bitmask&GoUpdateHooksFF == GoUpdateHooksFF {
+		ctx = outgoingCtxWithRubyFeatureFlag(ctx, "go-update-hook")
+	}
+
+	return ctx, cancel
 }
 
 func TestMain(m *testing.M) {

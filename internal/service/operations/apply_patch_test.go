@@ -1,6 +1,7 @@
 package operations_test
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -19,6 +20,15 @@ import (
 )
 
 func TestSuccessfulUserApplyPatch(t *testing.T) {
+	for _, featureFlagBitmask := range operations.FeatureFlagsBitmasks {
+		ctx, cancel := operations.ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
+
+		testSuccessfulUserApplyPatch(t, ctx)
+	}
+}
+
+func testSuccessfulUserApplyPatch(t *testing.T, ctx context.Context) {
 	server, serverSocketPath := runFullServerWithHooks(t)
 	defer server.Stop()
 
@@ -30,9 +40,6 @@ func TestSuccessfulUserApplyPatch(t *testing.T) {
 
 	cleanupSrv := operations.SetupAndStartGitlabServer(t, user.GlId, testRepo.GlRepository)
 	defer cleanupSrv()
-
-	ctx, cancel := testhelper.Context()
-	defer cancel()
 
 	user := &gitalypb.User{
 		Name:  []byte("Jane Doe"),

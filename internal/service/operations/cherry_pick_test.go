@@ -1,6 +1,7 @@
 package operations_test
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -17,9 +18,15 @@ import (
 )
 
 func TestSuccessfulUserCherryPickRequest(t *testing.T) {
-	ctxOuter, cancel := testhelper.Context()
-	defer cancel()
+	for _, featureFlagBitmask := range operations.FeatureFlagsBitmasks {
+		ctx, cancel := operations.ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
 
+		testSuccessfulUserCherryPickRequest(t, ctx)
+	}
+}
+
+func testSuccessfulUserCherryPickRequest(t *testing.T, ctxOuter context.Context) {
 	server, serverSocketPath := runFullServerWithHooks(t)
 	defer server.Stop()
 

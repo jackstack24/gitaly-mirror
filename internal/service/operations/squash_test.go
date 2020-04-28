@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"path/filepath"
@@ -27,9 +28,15 @@ var (
 )
 
 func TestSuccessfulUserSquashRequest(t *testing.T) {
-	ctx, cancel := testhelper.Context()
-	defer cancel()
+	for _, featureFlagBitmask := range FeatureFlagsBitmasks {
+		ctx, cancel := ContextWithFeatureFlags(featureFlagBitmask)
+		defer cancel()
 
+		testSuccessfulUserSquashRequest(t, ctx)
+	}
+}
+
+func testSuccessfulUserSquashRequest(t *testing.T, ctx context.Context) {
 	serverSocketPath, stop := runOperationServiceServer(t)
 	defer stop()
 
