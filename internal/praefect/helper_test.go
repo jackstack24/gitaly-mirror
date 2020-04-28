@@ -199,7 +199,6 @@ func runPraefectServerWithGitalyWithDatastore(t *testing.T, conf config.Config, 
 	coordinator := NewCoordinator(logEntry, ds, nodeMgr, conf, registry)
 
 	replmgr := NewReplMgr(
-		conf.VirtualStorages[0].Name,
 		logEntry,
 		ds,
 		nodeMgr,
@@ -220,7 +219,7 @@ func runPraefectServerWithGitalyWithDatastore(t *testing.T, conf config.Config, 
 
 	prf.RegisterServices(nodeMgr, conf, ds)
 	go func() { errQ <- prf.Serve(listener, false) }()
-	go func() { errQ <- replmgr.ProcessBacklog(ctx, noopBackoffFunc) }()
+	replmgr.ProcessBacklog(ctx, noopBackoffFunc)
 
 	// dial client to praefect
 	cc := dialLocalPort(t, port, false)
@@ -233,7 +232,6 @@ func runPraefectServerWithGitalyWithDatastore(t *testing.T, conf config.Config, 
 		ctx, timed := context.WithTimeout(ctx, time.Second)
 		defer timed()
 		require.NoError(t, prf.Shutdown(ctx))
-		require.NoError(t, <-errQ)
 
 		cancel()
 		require.Error(t, context.Canceled, <-errQ)
