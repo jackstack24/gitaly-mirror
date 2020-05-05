@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"gitlab.com/gitlab-org/gitaly/internal/praefect/datastore"
 	"gitlab.com/gitlab-org/gitaly/internal/praefect/transactions"
 	"gitlab.com/gitlab-org/gitaly/internal/testhelper"
 	"gitlab.com/gitlab-org/gitaly/proto/go/gitalypb"
@@ -16,22 +15,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func runPraefectWithTransactionMgr(t *testing.T) (*grpc.ClientConn, *transactions.Manager, testhelper.Cleanup) {
+func runPraefectServerAndTxMgr(t testing.TB) (*grpc.ClientConn, *transactions.Manager, testhelper.Cleanup) {
 	conf := testConfig(1)
-
-	ds := datastore.Datastore{
-		ReplicasDatastore:     datastore.NewInMemory(conf),
-		ReplicationEventQueue: datastore.NewMemoryReplicationEventQueue(),
-	}
-
-	txMgr := transactions.NewManager()
-	conn, _, cleanup := runPraefectServer(t, conf, ds, txMgr)
-
-	return conn, txMgr, cleanup
+	txMgr := defaultTxMgr()
+	cc, _, cleanup := runPraefectServer(t, conf, buildOptions{
+		withTxMgr:   txMgr,
+		withNodeMgr: nullNodeMgr{}, // to suppress node address issues
+	})
+	return cc, txMgr, cleanup
 }
 
 func TestTransactionSucceeds(t *testing.T) {
-	cc, txMgr, cleanup := runPraefectWithTransactionMgr(t)
+	cc, txMgr, cleanup := runPraefectServerAndTxMgr(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -56,7 +51,7 @@ func TestTransactionSucceeds(t *testing.T) {
 }
 
 func TestTransactionFailsWithMultipleNodes(t *testing.T) {
-	_, txMgr, cleanup := runPraefectWithTransactionMgr(t)
+	_, txMgr, cleanup := runPraefectServerAndTxMgr(t)
 	defer cleanup()
 
 	_, _, err := txMgr.RegisterTransaction([]string{"node1", "node2"})
@@ -64,7 +59,7 @@ func TestTransactionFailsWithMultipleNodes(t *testing.T) {
 }
 
 func TestTransactionFailures(t *testing.T) {
-	cc, _, cleanup := runPraefectWithTransactionMgr(t)
+	cc, _, cleanup := runPraefectServerAndTxMgr(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -83,7 +78,7 @@ func TestTransactionFailures(t *testing.T) {
 }
 
 func TestTransactionCancellation(t *testing.T) {
-	cc, txMgr, cleanup := runPraefectWithTransactionMgr(t)
+	cc, txMgr, cleanup := runPraefectServerAndTxMgr(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
